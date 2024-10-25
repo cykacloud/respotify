@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "NodeNext",
+    "outDir": "build",
+    "rootDirs": ["src", "assets"],
+    "baseUrl": "src",
+    "paths": {
+      "~/*": ["./*/index.ts", "./*.ts"],
+    },
+    "strict": true,
+    "moduleResolution": "NodeNext",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+
+    "skipLibCheck": false,
+    "forceConsistentCasingInFileNames": true,
+  },
+  "ts-node": {
+    "esm": true
+  },
+  "exclude": ["build", "node_modules"]
+}
