@@ -1,8 +1,9 @@
-import { Base62 } from '~/utils';
+import createDebug from 'debug';
+
+import { Base62, DownloadError, HttpClient, type HttpClientOptions } from '~/utils';
 import { License_KeyContainer_KeyType, Session } from '~/widewine';
 import { widevineIdentifierBlob, widevinePrivateKey } from './constants';
 import { SpotifyDecryptor, SpotifyDecryptorFFmpeg } from './decryptors';
-import createDebug from 'debug';
 import { SpotifyAuth } from './auth';
 
 export interface SpotifyAudioFile {
@@ -10,31 +11,43 @@ export interface SpotifyAudioFile {
   format: string;
 }
 
-export type SpotifyAudioFiles = SpotifyAudioFile[]
+export type SpotifyAudioFiles = SpotifyAudioFile[];
 
 export type SpotifyAudioType = 'track' | 'episode';
 
+/** formats tried in order when the caller does not pin one explicitly. */
+export const DEFAULT_FORMAT_PREFERENCE = ['MP4_128', 'MP4_256'] as const;
+
 export interface SpotifyDownloadOptions {
+  /** a bare 22-char id, or an `open.spotify.com` link. */
   input: string;
   type?: SpotifyAudioType;
-  format?: string;
+  /** a single format, or a preference list tried in order. */
+  format?: string | readonly string[];
+  /** renew the access token before starting, even if it still looks valid. */
   forceAccessToken?: boolean;
 }
 
+export interface SpotifyDownloaderOptions {
+  decryptor?: SpotifyDecryptor;
+  /** http tuning for metadata/license/cdn calls. inherits the auth proxy if omitted. */
+  http?: HttpClient | HttpClientOptions;
+}
+
 export interface SpotifyMetadata {
-  file: SpotifyAudioFiles;
-  alternative?: [
-    {
-      file?: SpotifyAudioFiles;
-    }
-  ];
+  file?: SpotifyAudioFiles;
+  alternative?: { file?: SpotifyAudioFiles }[];
   audio?: SpotifyAudioFiles;
 }
 
 export interface SpotifyDownloadResult {
   id: string;
   gid: string;
+  type: SpotifyAudioType;
+  format: string;
+  /** decrypted, playable audio. */
   track: Buffer;
+  /** the raw encrypted payload as served by the cdn. */
   encrypted: Buffer;
   decryptionKey: string;
   streamUrl: string;
@@ -42,6 +55,24 @@ export interface SpotifyDownloadResult {
 
 const debug = createDebug('respotify:downloader');
 
+const SPCLIENT = 'https://spclient.wg.spotify.com';
+const ID_PATTERN = /^[a-zA-Z0-9]{22}$/;
+const AUDIO_TYPES: readonly string[] = ['track', 'episode'];
+
+const isAudioType = (value: string): value is SpotifyAudioType => AUDIO_TYPES.includes(value);
+
+const toHttpClient = (http?: HttpClient | HttpClientOptions): HttpClient | undefined => {
+  if (!http) return undefined;
+  return http instanceof HttpClient ? http : new HttpClient(http);
+};
+
+/**
+ * resolves a track/episode to its encrypted cdn payload, obtains a widevine
+ * content key, and hands both to a decryptor.
+ *
+ * every request pulls the token from {@link SpotifyAuth.getAccessToken}, so an
+ * expired session renews itself mid-download instead of failing the call.
+ */
 export class SpotifyDownloader {
   static base62 = new Base62();
 
@@ -49,150 +80,177 @@ export class SpotifyDownloader {
     return BigInt(this.base62.decode(id)).toString(16).padStart(32, '0');
   }
 
-  static extractId(link: string) {
+  static extractId(link: string): { type: SpotifyAudioType; id: string } | null {
     try {
       const url = new URL(link);
       const groups = url.pathname.match(/^\/(?<type>track|episode)\/(?<id>[a-z0-9]+)/si)?.groups;
       if (!groups) return null;
+
       const { type, id } = groups;
-      return { type, id };
-    } catch (e) {
+      if (!isAudioType(type.toLowerCase())) return null;
+
+      return { type: type.toLowerCase() as SpotifyAudioType, id };
+    } catch {
       return null;
     }
   }
 
-  static getAudioFilesFromMetadata(metadata: SpotifyMetadata): SpotifyAudioFiles | null {
-    return metadata.file ?? metadata.alternative?.[0]?.file ?? metadata?.audio ?? null;
+  static getAudioFilesFromMetadata(metadata: SpotifyMetadata): SpotifyAudioFiles {
+    return metadata.file
+      ?? metadata.alternative?.find((a) => a.file?.length)?.file
+      ?? metadata.audio
+      ?? [];
   }
 
-  /**
-   * Parse input (id or open.spotify.com link) and return [id, gid]
-   */
-  static inputParse(input: string, type: SpotifyAudioType = 'track'): [
-    {
-      id: string;
-      type: SpotifyAudioType;
-    },
-    string
-  ] {
-    const extracted = /^[a-zA-Z0-9]{22}$/.test(input) ? { type, id: input } : this.extractId(input);
-    if (!extracted) throw new Error('Invalid ID or link');
-    // @ts-expect-error poebat)
-    return [extracted, this.idToGid(extracted.id)] as const;
+  /** parse a bare id or an open.spotify.com link into `[{ id, type }, gid]`. */
+  static inputParse(
+    input: string,
+    type: SpotifyAudioType = 'track'
+  ): [{ id: string; type: SpotifyAudioType }, string] {
+    const extracted = ID_PATTERN.test(input)
+      ? { type, id: input }
+      : this.extractId(input);
+
+    if (!extracted) throw new DownloadError(`not a valid spotify id or link: ${input}`);
+
+    return [extracted, this.idToGid(extracted.id)];
   }
 
-  constructor(private auth: SpotifyAuth, public decryptor: SpotifyDecryptor = new SpotifyDecryptorFFmpeg('/tmp')) {}
+  readonly decryptor: SpotifyDecryptor;
+  private readonly http: HttpClient;
 
-  get accessToken() {
-    return this.auth.exportedCredentials.accessToken;
+  constructor(
+    private readonly auth: SpotifyAuth,
+    decryptorOrOptions: SpotifyDecryptor | SpotifyDownloaderOptions = {}
+  ) {
+    const options: SpotifyDownloaderOptions = 'decrypt' in decryptorOrOptions
+      ? { decryptor: decryptorOrOptions }
+      : decryptorOrOptions;
+
+    this.decryptor = options.decryptor ?? new SpotifyDecryptorFFmpeg();
+    this.http = toHttpClient(options.http) ?? new HttpClient();
   }
 
-  get hasAccessToken() {
-    return !!this.accessToken;
+  /** authorization header with a token guaranteed fresh at call time. */
+  private async authHeaders(): Promise<Record<string, string>> {
+    return { authorization: `Bearer ${await this.auth.getAccessToken()}` };
   }
 
   async fetchMetadata(gid: string, type: SpotifyAudioType = 'track'): Promise<SpotifyMetadata> {
     debug('fetch metadata gid=%s type=%s', gid, type);
-    if (!this.hasAccessToken) throw new Error('No access token');
 
-    const response = await fetch(`https://spclient.wg.spotify.com/metadata/4/${type}/${gid}?market=from_token`, {
-      headers: {
-        authorization: `Bearer ${this.accessToken}`,
-        accept: 'application/json',    
+    return this.http.json<SpotifyMetadata>(
+      `${SPCLIENT}/metadata/4/${type}/${gid}?market=from_token`,
+      {
+        headers: {
+          ...(await this.authHeaders()),
+          accept: 'application/json',
+        }
       }
-    });
-
-    const json = await response.json();
-    debug('metadata', json);
-
-    return json;
+    );
   }
 
-  async fetchPssh(fileId: string) {
-    debug('fetch pssh', fileId);
-    const response = await fetch(`https://seektables.scdn.co/seektable/${fileId}.json`);
-    const json = await response.json();
-    debug('pssh', json);
-    return Buffer.from(json['pssh'], 'base64');
+  async fetchPssh(fileId: string): Promise<Buffer> {
+    debug('fetch pssh %s', fileId);
+
+    const json = await this.http.json<{ pssh?: string }>(
+      `https://seektables.scdn.co/seektable/${fileId}.json`
+    );
+
+    if (!json.pssh) throw new DownloadError(`no pssh in seektable for file ${fileId}`);
+
+    return Buffer.from(json.pssh, 'base64');
   }
 
-  async fetchLicense(body: ArrayBuffer | Buffer) {
-    debug('fetch license');
-    const response = await fetch('https://spclient.wg.spotify.com/widevine-license/v1/audio/license', {
+  async fetchLicense(body: ArrayBuffer | Buffer): Promise<ArrayBuffer> {
+    debug('fetch widevine license');
+
+    const response = await this.http.request(`${SPCLIENT}/widevine-license/v1/audio/license`, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${this.accessToken}`,
+        ...(await this.authHeaders()),
         'content-type': 'application/octet-stream',
-        'content-length': String(body.byteLength),
-        'user-agent': 'Spotify/8.9.62.566 Android/33 (Pixel 5)',
-        
+        'user-agent': SpotifyAuth.LOGIN5_HEADERS['user-agent'],
       },
-      body
+      body: body as unknown as RequestInit['body'],
     });
-    debug('is license fetched', response.ok);
-    if (!response.ok) throw new Error('Failed to fetch license');
-    
+
     return response.arrayBuffer();
   }
 
-  async fetchStreamUrl(fileId: string): Promise<string | null> {
-    const response = await fetch(`https://spclient.wg.spotify.com/storage-resolve/v2/files/audio/interactive/11/${fileId}?version=10000000&product=9&platform=39&alt=json`, {
-      headers: {
-        authorization: `Bearer ${this.accessToken}`,
-      }
-    });
-    const json = await response.json();
-    return json['cdnurl']?.[0] ?? null;
+  async fetchStreamUrl(fileId: string): Promise<string> {
+    const json = await this.http.json<{ cdnurl?: string[] }>(
+      `${SPCLIENT}/storage-resolve/v2/files/audio/interactive/11/${fileId}`
+        + '?version=10000000&product=9&platform=39&alt=json',
+      { headers: await this.authHeaders() }
+    );
+
+    const url = json.cdnurl?.[0];
+    if (!url) throw new DownloadError(`storage-resolve returned no cdn url for file ${fileId}`);
+
+    return url;
+  }
+
+  /** pick the first available file matching the caller's format preference. */
+  private static selectAudioFile(
+    metadata: SpotifyMetadata,
+    preference: readonly string[]
+  ): SpotifyAudioFile {
+    const files = SpotifyDownloader.getAudioFilesFromMetadata(metadata);
+
+    for (const format of preference) {
+      const match = files.find((file) => file.format === format);
+      if (match) return match;
+    }
+
+    throw new DownloadError(
+      `none of the requested formats [${preference.join(', ')}] are available; `
+      + `got [${files.map((f) => f.format).join(', ') || 'nothing'}]`
+    );
   }
 
   async download({
     input,
     type = 'track',
-    format = 'MP4_128', 
+    format = DEFAULT_FORMAT_PREFERENCE,
     forceAccessToken = false
   }: SpotifyDownloadOptions): Promise<SpotifyDownloadResult> {
-    debug('download track, input=%s forceAccessToken=%b', input, forceAccessToken);
-    debug('format', format);
-
     const [{ id, type: audioType }, gid] = SpotifyDownloader.inputParse(input, type);
+    const preference = typeof format === 'string' ? [format] : format;
+    debug('download id=%s type=%s formats=%o', id, audioType, preference);
 
-    if (forceAccessToken || !this.hasAccessToken) {
-      debug(`fetch accessToken (reason: forceAccessToken=${forceAccessToken}, hasAccessToken=${this.hasAccessToken})`);
-      await this.auth.updateStoredCredential();
-    }
+    if (forceAccessToken) await this.auth.updateStoredCredential();
 
     const metadata = await this.fetchMetadata(gid, audioType);
-    const audioFile = SpotifyDownloader.getAudioFilesFromMetadata(metadata)
-      ?.find((audioFile) => audioFile.format === format);
-    if (!audioFile) throw new Error(`No ${format} audio file found`);
-    debug('found audioFile', audioFile);
+    const audioFile = SpotifyDownloader.selectAudioFile(metadata, preference);
+    debug('selected %s (%s)', audioFile.format, audioFile.file_id);
 
     const pssh = await this.fetchPssh(audioFile.file_id);
-    debug('create session');
-    const session = new Session({
-      privateKey: widevinePrivateKey, identifierBlob: widevineIdentifierBlob
-    }, pssh);
+    const session = new Session(
+      { privateKey: widevinePrivateKey, identifierBlob: widevineIdentifierBlob },
+      pssh
+    );
 
     const licenseResponse = await this.fetchLicense(session.createLicenseRequest());
     const license = session.parseLicense(Buffer.from(licenseResponse));
-    debug('parsed license', license);
-    if (license.length === 0) throw new Error('Failed to parse license');
+    if (license.length === 0) throw new DownloadError('widevine license contained no keys');
 
-    const decryptionKey = license.find((k) => k.type === License_KeyContainer_KeyType.CONTENT)?.key;
-    debug('decryptionKey', decryptionKey);
-    if (!decryptionKey) throw new Error('Failed to find decryption key');
+    const decryptionKey = license
+      .find((k) => k.type === License_KeyContainer_KeyType.CONTENT)?.key;
+    if (!decryptionKey) throw new DownloadError('widevine license contained no content key');
+
     const streamUrl = await this.fetchStreamUrl(audioFile.file_id);
-    debug('streamUrl', streamUrl);
-    if (!streamUrl) throw new Error('Failed to fetch stream URL');
+    const encrypted = await this.http.buffer(streamUrl);
+    debug('downloaded %d encrypted bytes', encrypted.byteLength);
 
-    const encryptedm4a = await fetch(streamUrl);
-    const encrypted = Buffer.from(await encryptedm4a.arrayBuffer());
-    debug('trying to decrypt');
     const track = await this.decryptor.decrypt(decryptionKey, encrypted);
+    debug('decrypted to %d bytes', track.byteLength);
 
     return {
       id,
       gid,
+      type: audioType,
+      format: audioFile.format,
       track,
       encrypted,
       decryptionKey,
