@@ -1353,6 +1353,8 @@ interface SpotifyAudioFile {
     /** the enum name when known, otherwise the raw number as a string. */
     format: string;
     formatId: number;
+    /** bits per second, as the service reports it. */
+    bitrate?: number;
 }
 /**
  * turn `original_audio.uuid` from track metadata into the entity uri the

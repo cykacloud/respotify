@@ -47,6 +47,8 @@ export interface SpotifyAudioFile {
   /** the enum name when known, otherwise the raw number as a string. */
   format: string;
   formatId: number;
+  /** bits per second, as the service reports it. */
+  bitrate?: number;
 }
 
 /**
@@ -63,22 +65,30 @@ export const audioUriFromUuid = (uuid: string): string => {
 };
 
 /**
- * field numbers below are from librespot's extended_metadata.proto, and were
- * confirmed against a live response before this was written:
+ * field numbers read off a live response rather than guessed:
  *
  *   BatchedExtensionResponse.extended_metadata = 2
  *   EntityExtensionDataArray.extension_data    = 3
  *   EntityExtensionData.extension_data (Any)   = 3
  *   Any.type_url = 1, Any.value = 2
- *   AudioFilesExtensionResponse.file           = 1
- *   AudioFile.file_id = 1, AudioFile.format    = 2
+ *
+ *   AudioFilesExtensionResponse.entry = 1   (repeated)
+ *     entry.audio_file = 1
+ *       audio_file.file_id = 1, .format = 2
+ *     entry.bitrate = 4
+ *
+ * the entry wrapper is easy to miss: reading `file_id` straight off the entry
+ * yields the whole nested message — 24 bytes of tags and payload — which then
+ * sails through as a plausible-looking hex id and 404s at the cdn.
  */
 const RESPONSE_EXTENDED_METADATA = 2;
 const ARRAY_EXTENSION_DATA = 3;
 const ENTITY_EXTENSION_DATA = 3;
 const ANY_TYPE_URL = 1;
 const ANY_VALUE = 2;
-const AUDIO_FILES_FILE = 1;
+const RESPONSE_ENTRY = 1;
+const ENTRY_AUDIO_FILE = 1;
+const ENTRY_BITRATE = 4;
 const AUDIO_FILE_ID = 1;
 const AUDIO_FILE_FORMAT = 2;
 
@@ -109,17 +119,26 @@ const parseResponse = (body: Buffer): SpotifyAudioFile[] => {
   const payload = messageAt(anyFields, ANY_VALUE);
   if (!payload) throw new DownloadError('extended-metadata extension carried no value');
 
-  return messagesAt(readFields(payload), AUDIO_FILES_FILE).map((entry) => {
-    const fields = readFields(entry);
-    const fileId = messageAt(fields, AUDIO_FILE_ID);
-    const formatId = varintAt(fields, AUDIO_FILE_FORMAT) ?? 0;
+  return messagesAt(readFields(payload), RESPONSE_ENTRY).map((entry) => {
+    const entryFields = readFields(entry);
+    const audioFile = messageAt(entryFields, ENTRY_AUDIO_FILE);
 
-    if (!fileId) throw new DownloadError('audio file entry carried no file id');
+    if (!audioFile) throw new DownloadError('audio file entry carried no file');
+
+    const fileFields = readFields(audioFile);
+    const fileId = messageAt(fileFields, AUDIO_FILE_ID);
+    const formatId = varintAt(fileFields, AUDIO_FILE_FORMAT) ?? 0;
+
+    if (!fileId || fileId.length !== 20)
+      throw new DownloadError(
+        `audio file id should be 20 bytes, got ${fileId?.length ?? 0} — the response shape changed`
+      );
 
     return {
       fileId: fileId.toString('hex'),
       format: AUDIO_FILE_FORMATS[formatId as keyof typeof AUDIO_FILE_FORMATS] ?? String(formatId),
       formatId,
+      bitrate: varintAt(entryFields, ENTRY_BITRATE),
     };
   });
 };

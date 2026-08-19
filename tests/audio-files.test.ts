@@ -110,12 +110,15 @@ describe('audio files request', () => {
 
 /** rebuild the response spotify actually sends, then read it back. */
 const buildResponse = (
-  files: Array<[fileId: string, format: number]>,
+  files: Array<[fileId: string, format: number, bitrate?: number]>,
   typeUrl = 'type.googleapis.com/spotify.extendedmetadata.audiofiles.AudioFilesExtensionResponse'
 ) => {
   const payload = new ProtobufWriter();
-  for (const [fileId, format] of files) {
-    payload.message(1, new ProtobufWriter().bytes(1, Buffer.from(fileId, 'hex')).varint(2, format));
+  for (const [fileId, format, bitrate] of files) {
+    // the real shape: an entry wrapping the audio file, with the bitrate beside it
+    const audioFile = new ProtobufWriter().bytes(1, Buffer.from(fileId, 'hex')).varint(2, format);
+    const entry = new ProtobufWriter().message(1, audioFile).varint(4, bitrate ?? 160_000);
+    payload.message(1, entry);
   }
 
   const any = new ProtobufWriter().string(1, typeUrl).message(2, payload);
@@ -128,12 +131,12 @@ const buildResponse = (
 describe('audio files response', () => {
   /** the exact formats a live response carried for that track. */
   const LIVE = [
-    ['7ef44d290dc516478ca0366864edb669b4a6bea0', 0],
-    ['df6087632f48c2da7a049edf3bad9f5bf672781d', 8],
-    ['b7098e5bb8c2c1639bb44e0c17549e6d9f24bb3f', 1],
-    ['8499085407168921ce3d76c10ae6e7911e788b0b', 16],
-    ['5182bea01744133d7c58ad7f0360c6f7891f94d6', 2],
-  ] as Array<[string, number]>;
+    ['7ef44d290dc516478ca0366864edb669b4a6bea0', 0, 24_007],
+    ['df6087632f48c2da7a049edf3bad9f5bf672781d', 8, 24_007],
+    ['b7098e5bb8c2c1639bb44e0c17549e6d9f24bb3f', 1, 160_000],
+    ['8499085407168921ce3d76c10ae6e7911e788b0b', 16, 950_568],
+    ['5182bea01744133d7c58ad7f0360c6f7891f94d6', 2, 320_000],
+  ] as Array<[string, number, number]>;
 
   it('reads every file with its id and format name', () => {
     const files = parseAudioFilesResponse(buildResponse(LIVE));
@@ -143,6 +146,33 @@ describe('audio files response', () => {
     ]);
     assert.equal(files[0].fileId, '7ef44d290dc516478ca0366864edb669b4a6bea0');
     assert.equal(files[0].fileId.length, 40, 'file ids are 20 bytes');
+    assert.equal(files.find((f) => f.format === 'OGG_VORBIS_320')?.bitrate, 320_000);
+  });
+
+  /**
+   * the entry wrapper was missed on the first pass: reading file_id straight off
+   * the entry returned the whole nested message, which is still valid hex and
+   * only fails later, at the cdn.
+   */
+  it('reaches through the entry wrapper to the file id', () => {
+    const files = parseAudioFilesResponse(buildResponse(LIVE));
+
+    for (const file of files) assert.equal(file.fileId.length, 40, `${file.format} id length`);
+    assert.equal(new Set(files.map((f) => f.format)).size, 5, 'formats must not all collapse to one');
+  });
+
+  it('rejects a file id that is not 20 bytes rather than passing it on', () => {
+    const payload = new ProtobufWriter();
+    const audioFile = new ProtobufWriter().bytes(1, Buffer.alloc(8)).varint(2, 0);
+    payload.message(1, new ProtobufWriter().message(1, audioFile));
+    const any = new ProtobufWriter()
+      .string(1, 'type.googleapis.com/spotify.extendedmetadata.audiofiles.AudioFilesExtensionResponse')
+      .message(2, payload);
+    const body = new ProtobufWriter()
+      .message(2, new ProtobufWriter().message(3, new ProtobufWriter().message(3, any)))
+      .finish();
+
+    assert.throws(() => parseAudioFilesResponse(body), /20 bytes/);
   });
 
   it('keeps an unknown format as its number rather than dropping the file', () => {
