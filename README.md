@@ -38,9 +38,9 @@ library that runs anywhere node runs.
 
 ```bash
 # not published to npm — install from git
-pnpm add git+https://github.com/neverlane/respotify.git
-npm  add git+https://github.com/neverlane/respotify.git
-bun  add git+https://github.com/neverlane/respotify.git
+pnpm add git+https://github.com/cykacloud/respotify.git
+npm  add git+https://github.com/cykacloud/respotify.git
+bun  add git+https://github.com/cykacloud/respotify.git
 ```
 
 requires node >= 18.17. `ffmpeg` ships with the package via `ffmpeg-static`, so
@@ -252,4 +252,4 @@ DEBUG=respotify:* node your-script.js
 - [librespot](https://github.com/librespot-org) — `.proto` definitions for the spotify client
 - [Frooastside/node-widevine](https://github.com/Frooastside/node-widevine) — widevine session handling
 
-used in production by [midvetbmarubot](https://github.com/neverlane/midvetbmarubot).
+used in production by [midvetbmarubot](https://github.com/cykacloud/midvetbmaru).
