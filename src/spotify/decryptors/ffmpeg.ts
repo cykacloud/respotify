@@ -6,7 +6,7 @@ import { join } from 'path';
 import createDebug from 'debug';
 import ffmpegPath from 'ffmpeg-static';
 
-import { DecryptError } from '~/utils';
+import { DecryptError } from '../../utils';
 import { SpotifyDecryptor } from './abstract';
 
 const debug = createDebug('respotify:decryptor:ffmpeg');

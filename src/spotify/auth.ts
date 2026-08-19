@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'crypto';
 import createDebug from 'debug';
 import { hrtime } from 'process';
 
-import { AuthError, HttpClient, type HttpClientOptions, TokenExpiredError } from '~/utils';
+import { AuthError, HttpClient, type HttpClientOptions, TokenExpiredError } from '../utils';
 import {
   HashcashSolutionSchema
 } from './librespot/spotify/login5/v3/challenges/hashcash_pb';

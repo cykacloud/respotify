@@ -1,7 +1,7 @@
 import createDebug from 'debug';
 
-import { Base62, DownloadError, HttpClient, type HttpClientOptions } from '~/utils';
-import { License_KeyContainer_KeyType, Session } from '~/widewine';
+import { Base62, DownloadError, HttpClient, type HttpClientOptions } from '../utils';
+import { License_KeyContainer_KeyType, Session } from '../widewine';
 import { widevineIdentifierBlob, widevinePrivateKey } from './constants';
 import { SpotifyDecryptor, SpotifyDecryptorFFmpeg } from './decryptors';
 import { SpotifyAuth } from './auth';

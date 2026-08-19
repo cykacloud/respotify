@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import Long from 'long';
-import { AES_CMAC } from '~/utils';
+import { AES_CMAC } from '../utils';
 import {
   ClientIdentification,
   License,

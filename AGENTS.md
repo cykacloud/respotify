@@ -65,6 +65,11 @@ rather than patching by hand.
 **no `@ts-ignore` / `@ts-expect-error`.** the codebase is clean of them. if types
 fight you, the types are usually right.
 
+**no tsconfig path aliases.** imports inside `src/` are relative. this package is
+consumed as a git dependency, and pnpm builds it through `prepare` in a temporary
+directory where esbuild did not resolve `~/*` — the build failed there while
+succeeding in a normal checkout. relative imports resolve the same everywhere.
+
 ## verification
 
 ```bash
