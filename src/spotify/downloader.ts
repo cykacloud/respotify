@@ -28,6 +28,20 @@ export interface SpotifyDownloadOptions {
   forceAccessToken?: boolean;
 }
 
+/**
+ * anything that can hand over a currently-valid access token.
+ *
+ * {@link SpotifyAuth} satisfies this, and so does a caller holding an oauth
+ * refresh token: the internal `spclient` surface accepts a first-party bearer
+ * token regardless of how it was obtained, so the downloader has no business
+ * insisting on a login5 session.
+ */
+export interface SpotifyTokenProvider {
+  getAccessToken(): Promise<string>;
+  /** optional: only a login5 session can force a renewal on demand. */
+  updateStoredCredential?(): Promise<unknown>;
+}
+
 export interface SpotifyDownloaderOptions {
   decryptor?: SpotifyDecryptor;
   /** http tuning for metadata/license/cdn calls. inherits the auth proxy if omitted. */
@@ -120,7 +134,7 @@ export class SpotifyDownloader {
   private readonly http: HttpClient;
 
   constructor(
-    private readonly auth: SpotifyAuth,
+    private readonly auth: SpotifyTokenProvider,
     decryptorOrOptions: SpotifyDecryptor | SpotifyDownloaderOptions = {}
   ) {
     const options: SpotifyDownloaderOptions = 'decrypt' in decryptorOrOptions
@@ -219,7 +233,7 @@ export class SpotifyDownloader {
     const preference = typeof format === 'string' ? [format] : format;
     debug('download id=%s type=%s formats=%o', id, audioType, preference);
 
-    if (forceAccessToken) await this.auth.updateStoredCredential();
+    if (forceAccessToken) await this.auth.updateStoredCredential?.();
 
     const metadata = await this.fetchMetadata(gid, audioType);
     const audioFile = SpotifyDownloader.selectAudioFile(metadata, preference);
