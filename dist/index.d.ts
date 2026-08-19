@@ -1400,6 +1400,139 @@ declare class Session {
     get pssh(): Buffer;
 }
 
+/** packet types, from librespot's packet.rs. */
+declare const PACKET_LOGIN = 171;
+declare const PACKET_AP_WELCOME = 172;
+declare const PACKET_AUTH_FAILURE = 173;
+declare const PACKET_REQUEST_KEY = 12;
+declare const PACKET_AES_KEY = 13;
+declare const PACKET_AES_KEY_ERROR = 14;
+declare const PACKET_PING = 4;
+declare const PACKET_PONG = 73;
+declare const PACKET_PING_REQUEST = 74;
+declare const PACKET_COUNTRY_CODE = 27;
+interface Packet {
+    cmd: number;
+    payload: Buffer;
+}
+/** ask spotify which access point to use, rather than hardcoding one. */
+declare const resolveAccessPoint: (fetchImpl?: typeof globalThis.fetch) => Promise<{
+    host: string;
+    port: number;
+}>;
+interface ApConnectionOptions {
+    /** `ap.spotify.com:4070` style. resolved automatically when omitted. */
+    address?: {
+        host: string;
+        port: number;
+    };
+    /** shown to spotify as the device identity. */
+    deviceId?: string;
+    connectTimeoutMs?: number;
+}
+/**
+ * a connection to spotify's access point.
+ *
+ * this exists for exactly one reason: the audio key for ogg and flac is served
+ * nowhere else. spotify moved off widevine-protected mp4, and the replacement is
+ * aes-128-ctr under a per-file key that only this protocol hands out.
+ */
+declare class ApConnection {
+    private readonly options;
+    private socket;
+    private reader;
+    private sendCipher;
+    private recvCipher;
+    private sendSequence;
+    private recvSequence;
+    private keySequence;
+    private readonly deviceId;
+    constructor(options?: ApConnectionOptions);
+    get connected(): boolean;
+    connect(): Promise<void>;
+    private nonceFor;
+    send(cmd: number, payload: Buffer): Promise<void>;
+    receive(): Promise<Packet>;
+    /**
+     * read until a packet the caller cares about arrives.
+     *
+     * the access point interleaves keepalives and account chatter with replies, so
+     * anything unwanted is answered where it needs answering and skipped otherwise.
+     */
+    private receiveUntil;
+    /**
+     * authenticate with an oauth access token.
+     *
+     * the same token the http surfaces take: no password, no stored credential, so
+     * an account with two-factor auth is not a special case.
+     */
+    login(accessToken: string): Promise<string>;
+    /**
+     * the audio key for one file of one track.
+     *
+     * both ids are required: the key is bound to the pair, and a file id alone
+     * gets an error back.
+     */
+    requestAudioKey(fileId: Buffer, trackGid: Buffer): Promise<Buffer>;
+    close(): void;
+}
+
+/**
+ * the 768-bit modulus spotify's access point uses. this is a fixed protocol
+ * constant, not a choice: the server computes against the same one.
+ */
+declare const DH_PRIME: Buffer;
+declare const DH_GENERATOR = 2n;
+/** the modulus is 96 bytes, and both keys are exchanged at that exact width. */
+declare const DH_KEY_LENGTH = 96;
+/**
+ * big-endian, zero-padded to a fixed width.
+ *
+ * the padding is not cosmetic: a shared secret that happens to start with a zero
+ * byte would otherwise be one byte short, and every derived key would be wrong
+ * for that one connection in a few hundred — the kind of failure that looks
+ * random and is nearly impossible to reproduce.
+ */
+declare const toFixedWidth: (value: bigint, width: number) => Buffer;
+/** an ephemeral diffie-hellman key pair for one access-point connection. */
+declare class DiffieHellman {
+    private readonly privateKey;
+    readonly publicKey: Buffer;
+    constructor(privateKey?: Buffer);
+    sharedSecret(remotePublicKey: Buffer): Buffer;
+}
+
+interface HandshakeKeys {
+    sendKey: Buffer;
+    recvKey: Buffer;
+}
+/** what the handshake needs from its transport: ordered bytes, both ways. */
+interface HandshakeTransport {
+    write(data: Buffer): Promise<void>;
+    read(length: number): Promise<Buffer>;
+}
+declare const buildClientHello: (publicKey: Buffer, nonce: Buffer) => Buffer;
+declare const readServerPublicKey: (apResponse: Buffer) => Buffer;
+/**
+ * derive the session keys.
+ *
+ * five hmac-sha1 rounds over the full handshake transcript produce 100 bytes:
+ * the first 20 key the challenge that proves we computed the same secret, and
+ * the next 64 are the two shannon keys. the transcript is the framed bytes as
+ * they went over the wire, headers included — hashing the protobuf bodies alone
+ * gives a plausible-looking answer the server rejects.
+ */
+declare const deriveKeys: (sharedSecret: Buffer, transcript: Buffer) => HandshakeKeys & {
+    challenge: Buffer;
+};
+/**
+ * run the access-point handshake and return the two shannon keys.
+ *
+ * on any mismatch the server simply closes the socket, so every step that can
+ * fail says which one it was.
+ */
+declare const performHandshake: (transport: HandshakeTransport, dh?: DiffieHellman) => Promise<HandshakeKeys>;
+
 /** AudioFile.Format, from librespot's metadata.proto. */
 declare const AUDIO_FILE_FORMATS: {
     readonly 0: "OGG_VORBIS_96";
@@ -2217,4 +2350,4 @@ declare class SpotifyDownloader {
     download({ input, type, format, forceAccessToken }: SpotifyDownloadOptions): Promise<SpotifyDownloadResult>;
 }
 
-export { AES_CMAC, AUDIO_FILE_FORMATS, type AudioFileFormat, AudioKeyRequiredError, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DecryptError, type DeepPartial, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PlatformVerificationStatus, type ProtobufField, ProtobufWriter, ProtocolVersion, RespotifyError, Session, Shannon, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WIRE_BYTES, WIRE_FIXED32, WIRE_FIXED64, WIRE_VARINT, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, audioUriFromUuid, buildRequest as buildAudioFilesRequest, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, fetchAudioFiles, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, messageAt, messagesAt, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, parseResponse as parseAudioFilesResponse, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, readFields, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, stringAt, varintAt, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };
+export { AES_CMAC, AUDIO_FILE_FORMATS, ApConnection, type ApConnectionOptions, type AudioFileFormat, AudioKeyRequiredError, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DH_GENERATOR, DH_KEY_LENGTH, DH_PRIME, DecryptError, type DeepPartial, DiffieHellman, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, type HandshakeKeys, type HandshakeTransport, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PACKET_AES_KEY, PACKET_AES_KEY_ERROR, PACKET_AP_WELCOME, PACKET_AUTH_FAILURE, PACKET_COUNTRY_CODE, PACKET_LOGIN, PACKET_PING, PACKET_PING_REQUEST, PACKET_PONG, PACKET_REQUEST_KEY, type Packet, PlatformVerificationStatus, type ProtobufField, ProtobufWriter, ProtocolVersion, RespotifyError, Session, Shannon, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WIRE_BYTES, WIRE_FIXED32, WIRE_FIXED64, WIRE_VARINT, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, audioUriFromUuid, buildRequest as buildAudioFilesRequest, buildClientHello, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, deriveKeys, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, fetchAudioFiles, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, messageAt, messagesAt, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, parseResponse as parseAudioFilesResponse, performHandshake, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, readFields, readServerPublicKey, resolveAccessPoint, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, stringAt, toFixedWidth, varintAt, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };
