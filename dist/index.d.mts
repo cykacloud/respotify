@@ -76,6 +76,20 @@ declare class DownloadError extends RespotifyError {
 /** ffmpeg (or another decryptor backend) failed to produce plaintext audio. */
 declare class DecryptError extends RespotifyError {
 }
+/**
+ * the file was located, but decrypting it needs an audio key.
+ *
+ * spotify moved off widevine-protected mp4 for these formats: the audio is now
+ * ogg/aac/flac encrypted with aes-128-ctr under a per-file key, and that key is
+ * only served over the access-point protocol. distinct from
+ * {@link DownloadError} so callers can tell "this track does not exist" from
+ * "this build cannot decrypt it yet".
+ */
+declare class AudioKeyRequiredError extends RespotifyError {
+    readonly fileId: string;
+    readonly format: string;
+    constructor(fileId: string, format: string);
+}
 
 interface HttpClientOptions {
     /** proxy url (`http://`, `https://`, or `socks5://` if the runtime supports it). */
@@ -127,6 +141,48 @@ declare class HttpClient {
 }
 /** shared client for callers that do not need proxying or custom tuning. */
 declare const defaultHttpClient: HttpClient;
+
+/**
+ * just enough protobuf wire format to talk to two spotify endpoints.
+ *
+ * the alternative is generating code for the extended-metadata schema, which
+ * pulls in the whole `spotify.extendedmetadata` tree to read two nested fields.
+ * the wire format is simple enough that reading it directly is smaller than the
+ * generated types would be, and it does not go stale when spotify adds fields.
+ */
+declare const WIRE_VARINT = 0;
+declare const WIRE_FIXED64 = 1;
+declare const WIRE_BYTES = 2;
+declare const WIRE_FIXED32 = 5;
+interface ProtobufField {
+    field: number;
+    wire: number;
+    /** present for length-delimited fields. */
+    bytes?: Buffer;
+    /** present for varint and fixed-width fields. */
+    value?: number;
+}
+/** builds a message body; fields must be appended in whatever order the caller wants. */
+declare class ProtobufWriter {
+    private readonly chunks;
+    private tag;
+    varint(field: number, value: number): this;
+    bytes(field: number, value: Buffer | Uint8Array): this;
+    string(field: number, value: string): this;
+    /** nest another message under `field`. */
+    message(field: number, body: ProtobufWriter | Buffer): this;
+    private push;
+    finish(): Buffer;
+}
+/**
+ * split a message into its fields. unknown fields come back too, which is the
+ * point: spotify adds them regularly and nothing here should care.
+ */
+declare const readFields: (buffer: Buffer) => ProtobufField[];
+declare const messagesAt: (fields: ProtobufField[], field: number) => Buffer[];
+declare const messageAt: (fields: ProtobufField[], field: number) => Buffer | undefined;
+declare const varintAt: (fields: ProtobufField[], field: number) => number | undefined;
+declare const stringAt: (fields: ProtobufField[], field: number) => string | undefined;
 
 declare const protobufPackage = "license_protocol";
 declare enum LicenseType {
@@ -1272,6 +1328,49 @@ declare class Session {
     get pssh(): Buffer;
 }
 
+/** AudioFile.Format, from librespot's metadata.proto. */
+declare const AUDIO_FILE_FORMATS: {
+    readonly 0: "OGG_VORBIS_96";
+    readonly 1: "OGG_VORBIS_160";
+    readonly 2: "OGG_VORBIS_320";
+    readonly 3: "MP3_256";
+    readonly 4: "MP3_320";
+    readonly 5: "MP3_160";
+    readonly 6: "MP3_96";
+    readonly 7: "MP3_160_ENC";
+    readonly 8: "AAC_24";
+    readonly 9: "AAC_48";
+    readonly 16: "FLAC_FLAC";
+    readonly 18: "XHE_AAC_24";
+    readonly 19: "XHE_AAC_16";
+    readonly 20: "XHE_AAC_12";
+    readonly 22: "FLAC_FLAC_24BIT";
+};
+type AudioFileFormat = (typeof AUDIO_FILE_FORMATS)[keyof typeof AUDIO_FILE_FORMATS];
+interface SpotifyAudioFile {
+    /** hex, 20 bytes — what storage-resolve and the audio key are keyed on. */
+    fileId: string;
+    /** the enum name when known, otherwise the raw number as a string. */
+    format: string;
+    formatId: number;
+}
+/**
+ * turn `original_audio.uuid` from track metadata into the entity uri the
+ * extended-metadata service wants: `spotify:audio:<base62 of the uuid>`.
+ */
+declare const audioUriFromUuid: (uuid: string) => string;
+declare const buildRequest: (entityUri: string) => Buffer;
+declare const parseResponse: (body: Buffer) => SpotifyAudioFile[];
+/**
+ * ask which audio files exist for a track.
+ *
+ * spotify removed the `file` list from track metadata entirely — it is not
+ * empty for some regions, it is gone from both the json and the protobuf
+ * projections — and moved it here. anything that still reads `metadata.file`
+ * finds nothing and concludes the track is unavailable.
+ */
+declare const fetchAudioFiles: (http: HttpClient, accessToken: string, audioUuid: string) => Promise<SpotifyAudioFile[]>;
+
 /**
  * @generated from message spotify.login5.v3.ClientInfo
  */
@@ -1944,14 +2043,15 @@ declare class SpotifyDecryptorFFmpeg implements SpotifyDecryptor {
     private run;
 }
 
-interface SpotifyAudioFile {
-    file_id: string;
-    format: string;
-}
-type SpotifyAudioFiles = SpotifyAudioFile[];
 type SpotifyAudioType = 'track' | 'episode';
-/** formats tried in order when the caller does not pin one explicitly. */
-declare const DEFAULT_FORMAT_PREFERENCE: readonly ["MP4_128", "MP4_256"];
+/**
+ * formats tried in order when the caller does not pin one explicitly.
+ *
+ * mp4 is gone: spotify stopped offering the widevine-protected variants these
+ * used to default to, and now serves ogg/aac/flac instead. 320 first because it
+ * is the best lossy tier, flac last because it is an order of magnitude larger.
+ */
+declare const DEFAULT_FORMAT_PREFERENCE: readonly ["OGG_VORBIS_320", "OGG_VORBIS_160", "OGG_VORBIS_96", "AAC_24", "FLAC_FLAC"];
 interface SpotifyDownloadOptions {
     /** a bare 22-char id, or an `open.spotify.com` link. */
     input: string;
@@ -1980,11 +2080,17 @@ interface SpotifyDownloaderOptions {
     http?: HttpClient | HttpClientOptions;
 }
 interface SpotifyMetadata {
-    file?: SpotifyAudioFiles;
-    alternative?: {
-        file?: SpotifyAudioFiles;
-    }[];
-    audio?: SpotifyAudioFiles;
+    name?: string;
+    /**
+     * the content identifier the audio file list is keyed on.
+     *
+     * this replaced the old `file` array, which spotify no longer returns in
+     * either the json or the protobuf projection of track metadata.
+     */
+    original_audio?: {
+        uuid: string;
+        format?: string;
+    };
 }
 interface SpotifyDownloadResult {
     id: string;
@@ -2013,7 +2119,6 @@ declare class SpotifyDownloader {
         type: SpotifyAudioType;
         id: string;
     } | null;
-    static getAudioFilesFromMetadata(metadata: SpotifyMetadata): SpotifyAudioFiles;
     /** parse a bare id or an open.spotify.com link into `[{ id, type }, gid]`. */
     static inputParse(input: string, type?: SpotifyAudioType): [{
         id: string;
@@ -2029,8 +2134,13 @@ declare class SpotifyDownloader {
     fetchLicense(body: ArrayBuffer | Buffer): Promise<ArrayBuffer>;
     fetchStreamUrl(fileId: string): Promise<string>;
     /** pick the first available file matching the caller's format preference. */
-    private static selectAudioFile;
+    static selectAudioFile(files: SpotifyAudioFile[], preference: readonly string[]): SpotifyAudioFile;
+    /**
+     * every audio file spotify offers for a track: metadata for the content id,
+     * then the extended-metadata service for the files themselves.
+     */
+    resolveAudioFiles(input: string, type?: SpotifyAudioType): Promise<SpotifyAudioFile[]>;
     download({ input, type, format, forceAccessToken }: SpotifyDownloadOptions): Promise<SpotifyDownloadResult>;
 }
 
-export { AES_CMAC, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DecryptError, type DeepPartial, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PlatformVerificationStatus, ProtocolVersion, RespotifyError, Session, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioFiles, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };
+export { AES_CMAC, AUDIO_FILE_FORMATS, type AudioFileFormat, AudioKeyRequiredError, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DecryptError, type DeepPartial, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PlatformVerificationStatus, type ProtobufField, ProtobufWriter, ProtocolVersion, RespotifyError, Session, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WIRE_BYTES, WIRE_FIXED32, WIRE_FIXED64, WIRE_VARINT, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, audioUriFromUuid, buildRequest as buildAudioFilesRequest, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, fetchAudioFiles, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, messageAt, messagesAt, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, parseResponse as parseAudioFilesResponse, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, readFields, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, stringAt, varintAt, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };

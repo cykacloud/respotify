@@ -54,3 +54,21 @@ export class DownloadError extends RespotifyError {}
 
 /** ffmpeg (or another decryptor backend) failed to produce plaintext audio. */
 export class DecryptError extends RespotifyError {}
+
+/**
+ * the file was located, but decrypting it needs an audio key.
+ *
+ * spotify moved off widevine-protected mp4 for these formats: the audio is now
+ * ogg/aac/flac encrypted with aes-128-ctr under a per-file key, and that key is
+ * only served over the access-point protocol. distinct from
+ * {@link DownloadError} so callers can tell "this track does not exist" from
+ * "this build cannot decrypt it yet".
+ */
+export class AudioKeyRequiredError extends RespotifyError {
+  constructor(public readonly fileId: string, public readonly format: string) {
+    super(
+      `decrypting ${format} needs an audio key from the access point, `
+      + `which this build does not implement yet (file ${fileId})`
+    );
+  }
+}

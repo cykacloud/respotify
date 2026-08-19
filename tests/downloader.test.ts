@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { DownloadError } from '../src/utils';
-import { SpotifyDownloader, type SpotifyMetadata } from '../src/spotify/downloader';
+import { DEFAULT_FORMAT_PREFERENCE, SpotifyDownloader } from '../src/spotify/downloader';
 
 describe('input parsing', () => {
   it('accepts a bare 22-char id and defaults the type', () => {
@@ -52,33 +52,46 @@ describe('input parsing', () => {
   });
 });
 
-describe('metadata handling', () => {
-  const file = (format: string) => ({ file_id: `id-${format}`, format });
+describe('format selection', () => {
+  const file = (format: string, formatId: number) => ({ fileId: `id-${format}`, format, formatId });
 
-  it('prefers the top-level file list', () => {
-    const metadata: SpotifyMetadata = {
-      file: [file('MP4_128')],
-      audio: [file('MP4_256')],
-    };
+  it('takes the first format in the preference list that exists', () => {
+    const files = [file('OGG_VORBIS_96', 0), file('OGG_VORBIS_320', 2), file('FLAC_FLAC', 16)];
 
-    assert.deepEqual(SpotifyDownloader.getAudioFilesFromMetadata(metadata), [file('MP4_128')]);
+    assert.equal(
+      SpotifyDownloader.selectAudioFile(files, ['OGG_VORBIS_320', 'OGG_VORBIS_96']).format,
+      'OGG_VORBIS_320'
+    );
   });
 
-  it('falls back to the first alternative that actually has files', () => {
-    const metadata: SpotifyMetadata = {
-      alternative: [{}, { file: [file('MP4_128')] }],
-    };
+  it('falls through to a later preference', () => {
+    const files = [file('AAC_24', 8)];
 
-    assert.deepEqual(SpotifyDownloader.getAudioFilesFromMetadata(metadata), [file('MP4_128')]);
+    assert.equal(
+      SpotifyDownloader.selectAudioFile(files, ['OGG_VORBIS_320', 'AAC_24']).format,
+      'AAC_24'
+    );
   });
 
-  it('falls back to the audio list', () => {
-    const metadata: SpotifyMetadata = { audio: [file('MP4_256')] };
+  it('names what was available when nothing matches', () => {
+    const files = [file('FLAC_FLAC', 16)];
 
-    assert.deepEqual(SpotifyDownloader.getAudioFilesFromMetadata(metadata), [file('MP4_256')]);
+    assert.throws(
+      () => SpotifyDownloader.selectAudioFile(files, ['OGG_VORBIS_320']),
+      /got \[FLAC_FLAC\]/
+    );
   });
 
-  it('returns an empty list when nothing is available', () => {
-    assert.deepEqual(SpotifyDownloader.getAudioFilesFromMetadata({}), []);
+  it('says so when there are no files at all', () => {
+    assert.throws(() => SpotifyDownloader.selectAudioFile([], ['OGG_VORBIS_320']), /got \[nothing\]/);
+  });
+
+  /**
+   * mp4 used to be the default. spotify stopped serving those tiers, so a
+   * preference list still headed by them would resolve nothing for every track.
+   */
+  it('defaults to formats spotify actually serves', () => {
+    assert.equal(DEFAULT_FORMAT_PREFERENCE.includes('OGG_VORBIS_320' as never), true);
+    assert.equal(DEFAULT_FORMAT_PREFERENCE.some((f) => f.startsWith('MP4')), false);
   });
 });

@@ -1,22 +1,30 @@
 import createDebug from 'debug';
 
-import { Base62, DownloadError, HttpClient, type HttpClientOptions } from '../utils';
+import { AudioKeyRequiredError, Base62, DownloadError, HttpClient, type HttpClientOptions } from '../utils';
+import { fetchAudioFiles, type SpotifyAudioFile } from './audio-files';
 import { License_KeyContainer_KeyType, Session } from '../widewine';
 import { widevineIdentifierBlob, widevinePrivateKey } from './constants';
 import { SpotifyDecryptor, SpotifyDecryptorFFmpeg } from './decryptors';
 import { SpotifyAuth } from './auth';
 
-export interface SpotifyAudioFile {
-  file_id: string;
-  format: string;
-}
-
-export type SpotifyAudioFiles = SpotifyAudioFile[];
+export type { SpotifyAudioFile } from './audio-files';
 
 export type SpotifyAudioType = 'track' | 'episode';
 
-/** formats tried in order when the caller does not pin one explicitly. */
-export const DEFAULT_FORMAT_PREFERENCE = ['MP4_128', 'MP4_256'] as const;
+/**
+ * formats tried in order when the caller does not pin one explicitly.
+ *
+ * mp4 is gone: spotify stopped offering the widevine-protected variants these
+ * used to default to, and now serves ogg/aac/flac instead. 320 first because it
+ * is the best lossy tier, flac last because it is an order of magnitude larger.
+ */
+export const DEFAULT_FORMAT_PREFERENCE = [
+  'OGG_VORBIS_320',
+  'OGG_VORBIS_160',
+  'OGG_VORBIS_96',
+  'AAC_24',
+  'FLAC_FLAC',
+] as const;
 
 export interface SpotifyDownloadOptions {
   /** a bare 22-char id, or an `open.spotify.com` link. */
@@ -49,9 +57,14 @@ export interface SpotifyDownloaderOptions {
 }
 
 export interface SpotifyMetadata {
-  file?: SpotifyAudioFiles;
-  alternative?: { file?: SpotifyAudioFiles }[];
-  audio?: SpotifyAudioFiles;
+  name?: string;
+  /**
+   * the content identifier the audio file list is keyed on.
+   *
+   * this replaced the old `file` array, which spotify no longer returns in
+   * either the json or the protobuf projection of track metadata.
+   */
+  original_audio?: { uuid: string; format?: string };
 }
 
 export interface SpotifyDownloadResult {
@@ -107,13 +120,6 @@ export class SpotifyDownloader {
     } catch {
       return null;
     }
-  }
-
-  static getAudioFilesFromMetadata(metadata: SpotifyMetadata): SpotifyAudioFiles {
-    return metadata.file
-      ?? metadata.alternative?.find((a) => a.file?.length)?.file
-      ?? metadata.audio
-      ?? [];
   }
 
   /** parse a bare id or an open.spotify.com link into `[{ id, type }, gid]`. */
@@ -206,12 +212,10 @@ export class SpotifyDownloader {
   }
 
   /** pick the first available file matching the caller's format preference. */
-  private static selectAudioFile(
-    metadata: SpotifyMetadata,
+  static selectAudioFile(
+    files: SpotifyAudioFile[],
     preference: readonly string[]
   ): SpotifyAudioFile {
-    const files = SpotifyDownloader.getAudioFilesFromMetadata(metadata);
-
     for (const format of preference) {
       const match = files.find((file) => file.format === format);
       if (match) return match;
@@ -221,6 +225,27 @@ export class SpotifyDownloader {
       `none of the requested formats [${preference.join(', ')}] are available; `
       + `got [${files.map((f) => f.format).join(', ') || 'nothing'}]`
     );
+  }
+
+  /**
+   * every audio file spotify offers for a track: metadata for the content id,
+   * then the extended-metadata service for the files themselves.
+   */
+  async resolveAudioFiles(
+    input: string,
+    type: SpotifyAudioType = 'track'
+  ): Promise<SpotifyAudioFile[]> {
+    const [{ type: audioType }, gid] = SpotifyDownloader.inputParse(input, type);
+    const metadata = await this.fetchMetadata(gid, audioType);
+    const uuid = metadata.original_audio?.uuid;
+
+    if (!uuid)
+      throw new DownloadError(
+        `track metadata carried no original_audio.uuid, so its files cannot be looked up${
+          metadata.name ? ` (${metadata.name})` : ''}`
+      );
+
+    return fetchAudioFiles(this.http, await this.auth.getAccessToken(), uuid);
   }
 
   async download({
@@ -235,11 +260,21 @@ export class SpotifyDownloader {
 
     if (forceAccessToken) await this.auth.updateStoredCredential?.();
 
-    const metadata = await this.fetchMetadata(gid, audioType);
-    const audioFile = SpotifyDownloader.selectAudioFile(metadata, preference);
-    debug('selected %s (%s)', audioFile.format, audioFile.file_id);
+    const files = await this.resolveAudioFiles(input, audioType);
+    const audioFile = SpotifyDownloader.selectAudioFile(files, preference);
+    debug('selected %s (%s)', audioFile.format, audioFile.fileId);
 
-    const pssh = await this.fetchPssh(audioFile.file_id);
+    const streamUrl = await this.fetchStreamUrl(audioFile.fileId);
+    const encrypted = await this.http.buffer(streamUrl);
+    debug('downloaded %d encrypted bytes', encrypted.byteLength);
+
+    // widevine still covers the mp4 tiers, and its key comes over https. the
+    // ogg/aac/flac tiers spotify now serves instead are aes-128-ctr under a key
+    // only the access point hands out, so they stop here rather than returning
+    // ciphertext dressed up as audio.
+    const pssh = await this.fetchPssh(audioFile.fileId).catch(() => null);
+    if (!pssh) throw new AudioKeyRequiredError(audioFile.fileId, audioFile.format);
+
     const session = new Session(
       { privateKey: widevinePrivateKey, identifierBlob: widevineIdentifierBlob },
       pssh
@@ -252,10 +287,6 @@ export class SpotifyDownloader {
     const decryptionKey = license
       .find((k) => k.type === License_KeyContainer_KeyType.CONTENT)?.key;
     if (!decryptionKey) throw new DownloadError('widevine license contained no content key');
-
-    const streamUrl = await this.fetchStreamUrl(audioFile.file_id);
-    const encrypted = await this.http.buffer(streamUrl);
-    debug('downloaded %d encrypted bytes', encrypted.byteLength);
 
     const track = await this.decryptor.decrypt(decryptionKey, encrypted);
     debug('decrypted to %d bytes', track.byteLength);
