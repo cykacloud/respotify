@@ -47,11 +47,15 @@ requires node >= 18.17. `ffmpeg` ships with the package via `ffmpeg-static`, so
 there is nothing to install system-wide.
 
 > **pnpm 10+** blocks install scripts by default. `ffmpeg-static` needs its one
-> to fetch a binary, so allow it in your `package.json`:
+> to fetch a binary, so allow it:
 >
-> ```json
-> { "pnpm": { "onlyBuiltDependencies": ["ffmpeg-static", "respotify"] } }
+> ```yaml
+> # pnpm-workspace.yaml
+> allowBuilds:
+>   ffmpeg-static: true
 > ```
+>
+> respotify itself needs no build step — `dist/` ships in the repository.
 
 ## quick start
 
@@ -237,9 +241,12 @@ interface SpotifyDecryptor {
 
 ```bash
 pnpm install
-pnpm check      # typecheck + lint + tests
+pnpm check      # typecheck + lint + tests + dist is in sync
 pnpm build      # tsup -> dist (esm + cjs + d.ts)
 ```
+
+`dist/` is committed. after changing anything in `src/`, run `pnpm build` and
+commit the output alongside it — ci fails otherwise.
 
 debug logging is namespaced under `respotify:*`:
 

@@ -70,6 +70,13 @@ consumed as a git dependency, and pnpm builds it through `prepare` in a temporar
 directory where esbuild did not resolve `~/*` — the build failed there while
 succeeding in a normal checkout. relative imports resolve the same everywhere.
 
+**`dist/` is committed.** consumers install this straight from git, and building
+at install time made them depend on the toolchain matching across machines —
+tsup's declaration step produced a complete 81kb `.d.ts` locally and an empty
+80-byte one on the ci runner, so every install silently got a package with no
+types. there is no `prepare` script any more; run `pnpm build` and commit the
+result with the source change. `pnpm build:verify` fails if the two drift.
+
 ## verification
 
 ```bash

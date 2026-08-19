@@ -3,5 +3,8 @@
 .DS_Store
 node_modules
 dev
-dist
 *.tsbuildinfo
+
+# dist is committed on purpose: this package is installed straight from git, and
+# building it at install time made every consumer depend on the toolchain
+# agreeing across machines. `pnpm build:verify` fails ci if it drifts from src.

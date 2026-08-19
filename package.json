@@ -32,8 +32,8 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests --ext .ts",
-    "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "prepare": "tsup"
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build:verify",
+    "build:verify": "tsup && git diff --exit-code --stat -- dist"
   },
   "keywords": [
     "spotify",

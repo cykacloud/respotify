@@ -35,4 +35,6 @@ jobs:
 
       - run: pnpm test
 
-      - run: pnpm build
+      # dist is committed, so this both builds it and fails if what is in git no
+      # longer matches src.
+      - run: pnpm build:verify
