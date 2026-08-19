@@ -184,6 +184,78 @@ declare const messageAt: (fields: ProtobufField[], field: number) => Buffer | un
 declare const varintAt: (fields: ProtobufField[], field: number) => number | undefined;
 declare const stringAt: (fields: ProtobufField[], field: number) => string | undefined;
 
+/**
+ * shannon stream cipher — the one spotify's access point speaks.
+ *
+ * ported from the pure-javascript implementation by alexander kose
+ * (https://github.com/twonky4/shannon, MIT), which is itself a port of felix
+ * bruns' javascript port of the original c reference. vendored rather than
+ * depended on: it is a single 0.0.1 release from 2019 with one maintainer, and a
+ * cipher sitting in the authentication path is not somewhere to inherit an
+ * unpatchable dependency. the upstream test vectors ship alongside it.
+ *
+ * the arithmetic below is deliberately unchanged from the reference. it relies
+ * on javascript's 32-bit bitwise semantics throughout, including some habits
+ * that look like mistakes and are not — see the notes at each one.
+ */
+declare class Shannon {
+    /** working storage for the shift register. */
+    private R;
+    /** working storage for crc accumulation. */
+    private CRC;
+    /** saved register contents. */
+    private initR;
+    /** key dependent semi-constant. */
+    private konst;
+    /** encryption buffer. */
+    private sbuf;
+    /** partial word mac buffer. */
+    private mbuf;
+    /** number of part-word stream bits buffered. */
+    private nbuf;
+    constructor(key?: Buffer | Uint8Array | number[] | string);
+    /** nonlinear transform of a word; two slightly different combinations. */
+    private static sbox;
+    private static sbox2;
+    /** cycle the register and produce one output word in sbuf. */
+    private cycle;
+    /**
+     * accumulate a crc of input words for the mac: 32 parallel crc-16s over the
+     * ibm polynomial x^16 + x^15 + x^2 + 1.
+     */
+    private crcFunc;
+    /** normal mac word processing: both the stream register and the crc. */
+    private macFunc;
+    private initState;
+    private saveState;
+    private reloadState;
+    private addKey;
+    private diffuse;
+    /**
+     * fold key material into the register, allowing a length that is not a
+     * multiple of four. initialises the crc register as a side effect.
+     */
+    private loadKey;
+    key(key: Buffer | Uint8Array | number[] | string): this;
+    /** set the iv. spotify uses the packet sequence number. */
+    nonce(nonce: Buffer | Uint8Array | number[] | string): this;
+    /** xor keystream into the buffer. does not accumulate a mac. */
+    stream(input: Buffer | Uint8Array | number[] | string): Buffer;
+    /** accumulate words into the mac without encrypting them. */
+    macOnly(input: Buffer | Uint8Array | number[] | string): Buffer;
+    /** encrypt, accumulating the plaintext into the mac. */
+    encrypt(input: Buffer | Uint8Array | number[] | string, length?: number): Buffer;
+    /** decrypt, accumulating the recovered plaintext into the mac. */
+    decrypt(input: Buffer | Uint8Array | number[] | string, length?: number): Buffer;
+    /**
+     * finish the mac and write it into a buffer of the requested length.
+     *
+     * trailing bytes are treated as encrypted zero bytes, so the plaintext zeros
+     * are accumulated.
+     */
+    finish(size?: number | Buffer): Buffer;
+}
+
 declare const protobufPackage = "license_protocol";
 declare enum LicenseType {
     STREAMING = 1,
@@ -2145,4 +2217,4 @@ declare class SpotifyDownloader {
     download({ input, type, format, forceAccessToken }: SpotifyDownloadOptions): Promise<SpotifyDownloadResult>;
 }
 
-export { AES_CMAC, AUDIO_FILE_FORMATS, type AudioFileFormat, AudioKeyRequiredError, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DecryptError, type DeepPartial, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PlatformVerificationStatus, type ProtobufField, ProtobufWriter, ProtocolVersion, RespotifyError, Session, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WIRE_BYTES, WIRE_FIXED32, WIRE_FIXED64, WIRE_VARINT, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, audioUriFromUuid, buildRequest as buildAudioFilesRequest, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, fetchAudioFiles, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, messageAt, messagesAt, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, parseResponse as parseAudioFilesResponse, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, readFields, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, stringAt, varintAt, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };
+export { AES_CMAC, AUDIO_FILE_FORMATS, type AudioFileFormat, AudioKeyRequiredError, AuthError, Base62, ClientIdentification, ClientIdentification_ClientCapabilities, ClientIdentification_ClientCapabilities_AnalogOutputCapabilities, ClientIdentification_ClientCapabilities_CertificateKeyType, ClientIdentification_ClientCapabilities_HdcpVersion, ClientIdentification_ClientCredentials, ClientIdentification_NameValue, ClientIdentification_TokenType, type ContentDecryptionModule, DEFAULT_FORMAT_PREFERENCE, DecryptError, type DeepPartial, DownloadError, DrmCertificate, DrmCertificate_Algorithm, DrmCertificate_EncryptionKey, DrmCertificate_ServiceType, DrmCertificate_Type, EncryptedClientIdentification, type Exact, FileHashes, FileHashes_Signature, HashAlgorithmProto, HttpClient, type HttpClientOptions, HttpError, type HttpRequestOptions, type KeyContainer, License, LicenseIdentification, LicenseRequest, LicenseRequest_ContentIdentification, LicenseRequest_ContentIdentification_ExistingLicense, LicenseRequest_ContentIdentification_InitData, LicenseRequest_ContentIdentification_InitData_InitDataType, LicenseRequest_ContentIdentification_WebmKeyId, LicenseRequest_ContentIdentification_WidevinePsshData, LicenseRequest_RequestType, LicenseType, License_KeyContainer, License_KeyContainer_KeyControl, License_KeyContainer_KeyType, License_KeyContainer_OperatorSessionKeyPermissions, License_KeyContainer_OutputProtection, License_KeyContainer_OutputProtection_CGMS, License_KeyContainer_OutputProtection_HDCP, License_KeyContainer_OutputProtection_HdcpSrmRule, License_KeyContainer_SecurityLevel, License_KeyContainer_VideoResolutionConstraint, License_Policy, MetricData, MetricData_MetricType, MetricData_TypeValue, PlatformVerificationStatus, type ProtobufField, ProtobufWriter, ProtocolVersion, RespotifyError, Session, Shannon, SignedDrmCertificate, SignedMessage, SignedMessage_MessageType, SignedMessage_SessionKeyType, type SpotifyAudioFile, type SpotifyAudioType, SpotifyAuth, type SpotifyAuthLoginViaPasswordOptions, type SpotifyAuthLoginViaStoredCredentialOptions, type SpotifyAuthOptions, type SpotifyCredentials, type SpotifyDecryptor, SpotifyDecryptorFFmpeg, type SpotifyDecryptorFFmpegOptions, type SpotifyDownloadOptions, type SpotifyDownloadResult, SpotifyDownloader, type SpotifyDownloaderOptions, type SpotifyMetadata, type SpotifyTokenProvider, TimeoutError, TokenExpiredError, VersionInfo, WIRE_BYTES, WIRE_FIXED32, WIRE_FIXED64, WIRE_VARINT, WidevinePsshData, WidevinePsshData_Algorithm, WidevinePsshData_EntitledKey, WidevinePsshData_Type, audioUriFromUuid, buildRequest as buildAudioFilesRequest, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesFromJSON, clientIdentification_ClientCapabilities_AnalogOutputCapabilitiesToJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeFromJSON, clientIdentification_ClientCapabilities_CertificateKeyTypeToJSON, clientIdentification_ClientCapabilities_HdcpVersionFromJSON, clientIdentification_ClientCapabilities_HdcpVersionToJSON, clientIdentification_TokenTypeFromJSON, clientIdentification_TokenTypeToJSON, defaultHttpClient, drmCertificate_AlgorithmFromJSON, drmCertificate_AlgorithmToJSON, drmCertificate_ServiceTypeFromJSON, drmCertificate_ServiceTypeToJSON, drmCertificate_TypeFromJSON, drmCertificate_TypeToJSON, fetchAudioFiles, hashAlgorithmProtoFromJSON, hashAlgorithmProtoToJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeFromJSON, licenseRequest_ContentIdentification_InitData_InitDataTypeToJSON, licenseRequest_RequestTypeFromJSON, licenseRequest_RequestTypeToJSON, licenseTypeFromJSON, licenseTypeToJSON, license_KeyContainer_KeyTypeFromJSON, license_KeyContainer_KeyTypeToJSON, license_KeyContainer_OutputProtection_CGMSFromJSON, license_KeyContainer_OutputProtection_CGMSToJSON, license_KeyContainer_OutputProtection_HDCPFromJSON, license_KeyContainer_OutputProtection_HDCPToJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleFromJSON, license_KeyContainer_OutputProtection_HdcpSrmRuleToJSON, license_KeyContainer_SecurityLevelFromJSON, license_KeyContainer_SecurityLevelToJSON, messageAt, messagesAt, metricData_MetricTypeFromJSON, metricData_MetricTypeToJSON, parseResponse as parseAudioFilesResponse, platformVerificationStatusFromJSON, platformVerificationStatusToJSON, protobufPackage, protocolVersionFromJSON, protocolVersionToJSON, readFields, signedMessage_MessageTypeFromJSON, signedMessage_MessageTypeToJSON, signedMessage_SessionKeyTypeFromJSON, signedMessage_SessionKeyTypeToJSON, stringAt, varintAt, widevineIdentifierBlob, widevinePrivateKey, widevinePsshData_AlgorithmFromJSON, widevinePsshData_AlgorithmToJSON, widevinePsshData_TypeFromJSON, widevinePsshData_TypeToJSON };
