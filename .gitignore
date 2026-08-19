@@ -1,5 +1,7 @@
 .idea
 .vscode
+.DS_Store
 node_modules
 dev
 dist
+*.tsbuildinfo

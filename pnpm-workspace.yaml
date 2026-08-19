@@ -1,0 +1,6 @@
+# pnpm 10+ blocks install scripts by default. these three genuinely need theirs:
+# ffmpeg-static downloads its binary, esbuild and protobufjs link native/cli bits.
+allowBuilds:
+  esbuild: true
+  ffmpeg-static: true
+  protobufjs: true

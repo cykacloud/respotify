@@ -1,21 +1,48 @@
 {
   "name": "respotify",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "commonjs",
-  "description": "spotify downloader and some auth stuff",
+  "description": "headless spotify auth and track downloader",
   "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
-    "types": "./dist/index.d.mts",
-    "import": "./dist/index.mjs",
-    "require": "./dist/index.js"
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
   },
   "scripts": {
     "build": "tsup",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests --ext .ts",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
     "prepare": "tsup"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "spotify",
+    "librespot",
+    "login5",
+    "widevine",
+    "downloader"
+  ],
+  "author": "neverlane",
   "license": "ISC",
   "devDependencies": {
     "@stylistic/eslint-plugin": "^1.7.0",
@@ -25,13 +52,15 @@
     "@typescript-eslint/parser": "^7.4.0",
     "eslint": "^8.57.0",
     "tsup": "^8.0.2",
+    "tsx": "^4.23.12",
     "typescript": "^5.6.3"
   },
   "dependencies": {
-    "debug": "^4.3.7",
     "@bufbuild/protobuf": "^2.2.0",
+    "debug": "^4.3.7",
     "ffmpeg-static": "^5.2.0",
     "long": "^5.2.3",
-    "protobufjs": "^7.2.6"
+    "protobufjs": "^7.2.6",
+    "undici": "^6.20.1"
   }
 }
